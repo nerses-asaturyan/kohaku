@@ -26,11 +26,17 @@ impl JsUtxoSyncer {
         chain: &ChainConfig,
         provider: JsEip1193Provider,
         #[wasm_bindgen(js_name = "batchSize")] batch_size: u64,
+        #[wasm_bindgen(js_name = "batchDelayMs")] batch_delay_ms: Option<u64>,
     ) -> Self {
+        let mut syncer =
+            RpcSyncer::new(chain.clone(), Arc::new(provider)).with_batch_size(batch_size);
+        // RPC-only chains (no subsquid) sync the full tree over RPC; allow tuning the inter-batch
+        // delay down from the 1000ms default so a from-deployment sync is feasible.
+        if let Some(ms) = batch_delay_ms {
+            syncer = syncer.with_batch_delay(std::time::Duration::from_millis(ms));
+        }
         Self {
-            inner: Arc::new(
-                RpcSyncer::new(chain.clone(), Arc::new(provider)).with_batch_size(batch_size),
-            ),
+            inner: Arc::new(syncer),
         }
     }
 

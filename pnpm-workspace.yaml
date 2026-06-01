@@ -3,6 +3,7 @@ packages:
   - "packages/provider"
   - "packages/privacy-pools"
   - "packages/plugins"
+  - "packages/train"
   - "examples/pq-account"
   - "docs"
   - "crates/railgun-ts"

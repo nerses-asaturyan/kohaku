@@ -3,7 +3,7 @@
 //! <https://github.com/Railgun-Privacy/contract/blob/9ec09123eb140fdaaf3a5ff1f29d634c353630cd/contracts/logic/Globals.sol>
 
 use alloy::{
-    primitives::{Address, ChainId, FixedBytes, aliases::U72, utils::keccak256_cached},
+    primitives::{Address, ChainId, FixedBytes, aliases::U72, keccak256, utils::keccak256_cached},
     sol,
     sol_types::SolValue,
 };
@@ -288,17 +288,48 @@ sol! {
         G1Point c;
     }
 
-    /// RelayAdapt: native wrap + shield entrypoint (see Railgun `RelayAdapt.json` ABI).
+    /// RelayAdapt: native wrap + shield + cross-contract `relay` entrypoint (see Railgun `RelayAdapt.json` ABI).
     contract RelayAdapt {
         struct Call {
             address to;
             bytes data;
             uint256 value;
         }
+        struct ActionData {
+            bytes31 random;
+            bool requireSuccess;
+            uint256 minGasLimit;
+            Call[] calls;
+        }
         function multicall(bool _requireSuccess, Call[] calldata _calls) external payable;
         function wrapBase(uint256 _amount) external;
         function shield(ShieldRequest[] calldata _shieldRequests) external;
+        function relay(Transaction[] calldata _transactions, ActionData calldata _actionData) external payable;
     }
+}
+
+/// Computes the Railgun RelayAdapt `adaptParams`, byte-for-byte identical to
+/// railgun-community's `RelayAdaptHelper.getRelayAdaptParams`:
+///
+/// ```text
+/// keccak256(abi.encode(bytes32[][] nullifiers, uint256 transactionsLength, ActionData actionData))
+/// ```
+///
+/// The result is bound into each transaction's `BoundParams.adaptParams`; the on-chain
+/// RelayAdapt verifies it matches `getAdaptParams(transactions, actionData)`, so the proof
+/// commits to exactly these cross-contract `calls` (MITM protection).
+pub fn get_relay_adapt_params(
+    nullifiers_per_tx: Vec<Vec<FixedBytes<32>>>,
+    transactions_len: usize,
+    action_data: RelayAdapt::ActionData,
+) -> FixedBytes<32> {
+    let encoded = (
+        nullifiers_per_tx,
+        U256::from(transactions_len),
+        action_data,
+    )
+        .abi_encode_params();
+    keccak256(&encoded)
 }
 
 impl From<ShieldCiphertext> for Ciphertext {
@@ -405,5 +436,95 @@ mod tests {
 
         let ciphertext: Ciphertext = commitment_ciphertext.into();
         insta::assert_debug_snapshot!(ciphertext);
+    }
+}
+
+#[cfg(all(test, native))]
+mod relay_adapt_tests {
+    use alloy::primitives::{FixedBytes, U256, address, b256, bytes};
+
+    use crate::abis::railgun::{RelayAdapt, get_relay_adapt_params};
+
+    /// Reference vector generated from railgun-community's
+    /// `RelayAdaptHelper.getRelayAdaptParams` (@railgun-community/engine 10.x):
+    ///   nullifiers     = [[0x01*32, 0x02*32]]
+    ///   random         = 0xa1*31
+    ///   requireSuccess = true
+    ///   minGasLimit    = 7
+    ///   calls          = [{ to: 0xaa*20, data: 0x1234, value: 5 }]
+    #[test]
+    fn test_get_relay_adapt_params_matches_railgun_community() {
+        let nullifiers = vec![vec![
+            FixedBytes::<32>::from([0x01u8; 32]),
+            FixedBytes::<32>::from([0x02u8; 32]),
+        ]];
+        let action_data = RelayAdapt::ActionData {
+            random: FixedBytes::<31>::from([0xa1u8; 31]),
+            requireSuccess: true,
+            minGasLimit: U256::from(7),
+            calls: vec![RelayAdapt::Call {
+                to: address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                data: bytes!("0x1234"),
+                value: U256::from(5),
+            }],
+        };
+
+        let got = get_relay_adapt_params(nullifiers, 1, action_data);
+        let expected = b256!("0xe9ceb897a2930ce01a168d006524fe69a0fffc1573d415caabb88aeec573ed05");
+        assert_eq!(got, expected);
+    }
+
+    /// Cross-contract reference vectors (railgun-community RelayAdapt V2 path):
+    /// 2 ordered calls (user call + a representative relay-shield call), random 0xa1*31,
+    /// requireSuccess true. Verifies: (1) the multi-call hash, (2) that the REDUCED
+    /// minGasLimit (3_200_000-150_000) differs from the un-reduced value, (3) multi-tx
+    /// nullifier arrays. Generated from RelayAdaptHelper.getRelayAdaptParams.
+    #[test]
+    fn test_cross_contract_adapt_params_vectors() {
+        let calls = vec![
+            RelayAdapt::Call {
+                to: address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                data: bytes!("0x1234"),
+                value: U256::from(5),
+            },
+            RelayAdapt::Call {
+                to: address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                data: bytes!("0xcdcdcdcdcdcdcdcd"),
+                value: U256::ZERO,
+            },
+        ];
+        let action = |min_gas: u64| RelayAdapt::ActionData {
+            random: FixedBytes::<31>::from([0xa1u8; 31]),
+            requireSuccess: true,
+            minGasLimit: U256::from(min_gas),
+            calls: calls.clone(),
+        };
+        let nulls1 = vec![vec![
+            FixedBytes::<32>::from([0x01u8; 32]),
+            FixedBytes::<32>::from([0x02u8; 32]),
+        ]];
+
+        // 1 transaction, REDUCED minGasLimit (3_200_000 - 150_000 = 3_050_000).
+        assert_eq!(
+            get_relay_adapt_params(nulls1.clone(), 1, action(3_050_000)),
+            b256!("0x48f86d15f4bf78f3cf52c4c96ef4f0ab0ed0e874fbf9df34ffa53c1ebdb188ca"),
+        );
+        // Same inputs but the UN-reduced minGasLimit must hash differently.
+        assert_eq!(
+            get_relay_adapt_params(nulls1, 1, action(3_200_000)),
+            b256!("0xefe2a97933de1734c33382f4a61c3f1d0e640f9adde70e80131f25eb798e4a7a"),
+        );
+        // 2 transactions (nullifiers is bytes32[][], one inner array per transaction).
+        let nulls2 = vec![
+            vec![
+                FixedBytes::<32>::from([0x01u8; 32]),
+                FixedBytes::<32>::from([0x02u8; 32]),
+            ],
+            vec![FixedBytes::<32>::from([0x03u8; 32])],
+        ];
+        assert_eq!(
+            get_relay_adapt_params(nulls2, 2, action(3_050_000)),
+            b256!("0x9d12039f367fdbcdbe7faeb9693a5c1218b3ce73c973217b54378db3b8b8a3fb"),
+        );
     }
 }

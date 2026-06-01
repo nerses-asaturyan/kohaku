@@ -84,6 +84,7 @@ impl ChainConfig {
         match chain_id {
             c if c == Self::mainnet().id => Some(Self::mainnet()),
             c if c == Self::sepolia().id => Some(Self::sepolia()),
+            c if c == Self::arbitrum_sepolia().id => Some(Self::arbitrum_sepolia()),
             _ => None,
         }
     }
@@ -116,5 +117,42 @@ impl ChainConfig {
             "https://ppoi.fdi.network/",
             &["efc6ddb59c098a13fb2b618fdae94c1c3a807abc8fb1837c93620c9143ee9e88"],
         )
+    }
+
+    /// Arbitrum Sepolia (chain 421614) — the Train bridge's source chain.
+    ///
+    /// This is a self-hosted Railgun testnet deployment with NO subsquid indexer, so the
+    /// `subsquid_endpoint` is empty: `createRailgunPlugin` falls back to RPC-only UTXO sync
+    /// and disables POI (its TXID tree also syncs via subsquid). Addresses verified on-chain;
+    /// `deployment_block` is sourced from the POC `.env` (confirm the proxy creation block).
+    pub fn arbitrum_sepolia() -> Self {
+        Self::new(
+            421614,
+            address!("0x9Bfa29dC6cA794b8A49bC928EB4F5bBD80CD5Ab9"),
+            25,
+            address!("0x4B24c032569A45266F057EcE1Fd189a619D58ce6"),
+            address!("0x980B62Da83eFf3D4576C647993b0c1D7faf17c73"),
+            271453983,
+            0,
+            "", // No Arbitrum-Sepolia subsquid → RPC-only sync.
+            "", // POI disabled on this testnet.
+            Vec::<&str>::new(),
+        )
+    }
+}
+
+#[cfg(all(test, native))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arbitrum_sepolia_is_registered_rpc_only() {
+        let chain = ChainConfig::from_chain_id(421614).expect("Arbitrum Sepolia must be registered");
+        assert_eq!(chain.id, 421614);
+        assert_eq!(chain.unshield_fee_bps, 25);
+        assert_eq!(chain.subsquid_endpoint, ""); // RPC-only (no subsquid)
+        assert!(chain.list_keys.is_empty()); // POI disabled
+        // Scope is Arbitrum Sepolia only; mainnet Arbitrum (42161) is NOT registered.
+        assert!(ChainConfig::from_chain_id(42161).is_none());
     }
 }

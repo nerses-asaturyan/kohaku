@@ -1,0 +1,57 @@
+{
+  "name": "@kohaku-eth/train",
+  "version": "0.0.1-alpha.0",
+  "description": "Private cross-chain bridge: Railgun shielded pool -> TRAIN protocol -> Railgun shielded pool (Arbitrum Sepolia -> Ethereum Sepolia).",
+  "type": "module",
+  "private": true,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ethereum/kohaku.git",
+    "directory": "packages/train"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "echo Building @kohaku-eth/train && tsup --config tsup.config.ts",
+    "dev": "tsup --config tsup.config.ts --watch",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@kohaku-eth/plugins": "workspace:*",
+    "@kohaku-eth/provider": "workspace:*",
+    "@kohaku-eth/railgun": "workspace:*",
+    "@train-protocol/sdk": "^0.1.0-dev.3",
+    "ox": "^0.12.0",
+    "viem": "^2.37.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.1.0",
+    "dotenv": "^17.2.1",
+    "tsup": "^8.5.0",
+    "tsx": "^4.17.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.0.0"
+  }
+}

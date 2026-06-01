@@ -1,10 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use alloy::{
-    primitives::{Address, Bytes, aliases::U192},
+    primitives::{Address, Bytes, FixedBytes, U256, aliases::U192},
     sol_types::SolCall,
 };
 use eip_1193_provider::provider::{Eip1193Error, Eip1193Provider};
+use eip_1193_provider::tx_data::TxData;
 use rand::Rng;
 use serde::Serialize;
 use thiserror::Error;
@@ -17,14 +18,14 @@ use userop_kit::{
 };
 
 use crate::{
-    abis::railgun::RailgunSmartWallet,
+    abis::railgun::{RailgunSmartWallet, RelayAdapt, ShieldRequest, get_relay_adapt_params},
     account::{address::RailgunAddress, signer::RailgunSigner},
     caip::AssetId,
     chain_config::ChainConfig,
     circuit::groth16_prover::Groth16Prover,
     crypto::keys::{ByteKey, MasterPublicKey, ViewingPublicKey},
     indexer::utxo_indexer::{UtxoIndexer, UtxoIndexerError},
-    note::{Note, utxo::UtxoNote},
+    note::{Note, encrypt::encrypt_shield, utxo::UtxoNote},
     poi::{
         provider::{PoiProvider, PoiProviderError},
         types::PoiStatus,
@@ -288,6 +289,111 @@ impl RailgunProvider {
             std::io::ErrorKind::Other,
             "Failed to converge on fee estimate",
         ))));
+    }
+
+    /// Prepares a self-broadcastable RelayAdapt cross-contract unshield.
+    ///
+    /// Unshields each `(asset, value)` from `from` to the RelayAdapt contract, runs
+    /// `user_calls` inside the RelayAdapt multicall (msg.sender == RelayAdapt), then
+    /// re-shields `reshields` back into the pool (use `value = 0` to re-shield the entire
+    /// remaining balance of that token). Returns calldata for
+    /// `RelayAdapt.relay(transactions, actionData)`, to be broadcast by a funded EOA — the
+    /// broadcaster pays gas but never custodies the unshielded funds.
+    ///
+    /// `min_gas_limit` is the value placed verbatim in `actionData.minGasLimit`
+    /// (railgun-community uses the requested minimum minus 150_000, e.g. 3_050_000 by
+    /// default); the broadcast envelope `gasLimit` must be at least the un-reduced minimum
+    /// (e.g. 3_200_000). The same `actionData` instance is used for both the bound
+    /// `adaptParams` and the final `relay` calldata, satisfying the on-chain MITM check.
+    pub async fn prepare_relay_adapt_unshield<R: Rng>(
+        &mut self,
+        from: Arc<dyn RailgunSigner>,
+        unshields: Vec<(AssetId, u128)>,
+        user_calls: Vec<(Address, Bytes, U256)>,
+        reshields: Vec<(RailgunAddress, AssetId, u128)>,
+        require_success: bool,
+        min_gas_limit: u128,
+        rng: &mut R,
+    ) -> Result<TxData, RailgunProviderError> {
+        let relay = self.chain.relay_adapt_contract;
+
+        // (a) Build the unshield operations to the RelayAdapt contract (unproved).
+        let mut builder = self.transact();
+        for (asset, value) in &unshields {
+            builder = builder.unshield(from.clone(), relay, asset.clone(), *value)?;
+        }
+        let in_notes = self.all_unspent().await;
+        let operations = builder.build_operations(&in_notes, rng)?;
+
+        // (b) Per-operation nullifiers (pre-proof), in operation order -> bytes32[][].
+        // Must align with each on-chain Transaction.nullifiers (same note.nullifier, same order).
+        let nullifiers_per_tx: Vec<Vec<FixedBytes<32>>> = operations
+            .iter()
+            .map(|op| {
+                op.in_notes()
+                    .iter()
+                    .map(|n| FixedBytes::<32>::from(n.nullifier.to_be_bytes::<32>()))
+                    .collect()
+            })
+            .collect();
+
+        // (c) Re-shield requests, appended as a single RelayAdapt.shield call AFTER the user calls.
+        let shield_requests = reshields
+            .into_iter()
+            .map(|(recipient, asset, value)| encrypt_shield(recipient, asset, value, rng))
+            .collect::<Result<Vec<ShieldRequest>, _>>()
+            .map_err(TransactionBuilderError::Encryption)?;
+
+        let mut calls: Vec<RelayAdapt::Call> = user_calls
+            .into_iter()
+            .map(|(to, data, value)| RelayAdapt::Call { to, data, value })
+            .collect();
+        if !shield_requests.is_empty() {
+            calls.push(RelayAdapt::Call {
+                to: relay,
+                data: RelayAdapt::shieldCall {
+                    _shieldRequests: shield_requests,
+                }
+                .abi_encode()
+                .into(),
+                value: U256::ZERO,
+            });
+        }
+
+        // (d) ActionData + adaptParams. The SAME action_data feeds the hash and the relay calldata.
+        let mut random = [0u8; 31];
+        rng.fill(&mut random[..]);
+        let action_data = RelayAdapt::ActionData {
+            random: FixedBytes::<31>::from(random),
+            requireSuccess: require_success,
+            minGasLimit: U256::from(min_gas_limit),
+            calls,
+        };
+        let adapt_params =
+            get_relay_adapt_params(nullifiers_per_tx, operations.len(), action_data.clone());
+
+        // (e) Prove each operation with the RelayAdapt adapt params bound into BoundParams.
+        let proved = TransactionBuilder::prove(
+            &self.prover,
+            &self.utxo_indexer.utxo_trees,
+            self.chain.id,
+            &operations,
+            Some((relay, adapt_params)),
+            rng,
+        )
+        .await?;
+        if let Some(poi_provider) = &mut self.poi_provider {
+            poi_provider.register_ops(&proved).await?;
+        }
+
+        // (f) Assemble RelayAdapt.relay(transactions, actionData) -> self-broadcastable TxData.
+        let transactions = proved.iter().map(|op| op.transaction.clone()).collect();
+        let calldata = RelayAdapt::relayCall {
+            _transactions: transactions,
+            _actionData: action_data,
+        }
+        .abi_encode();
+        Ok(TxData::new(relay, calldata.into(), U256::ZERO))
     }
 
     async fn all_unspent(&mut self) -> Vec<UtxoNote> {

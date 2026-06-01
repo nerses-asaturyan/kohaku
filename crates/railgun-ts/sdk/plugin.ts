@@ -87,11 +87,16 @@ export type RGBroadcaster = Broadcaster<RGPrivateOperation>;
 
 
 export type RailgunPluginConfig = {
-    /** Optional RPC call batch size when syncing (default: 10) */
+    /** Optional RPC `eth_getLogs` block-range batch size when syncing (default: 10).
+     *  For RPC-only chains (no subsquid, e.g. Arbitrum Sepolia) raise this (e.g. 10_000). */
     rpcBatchSize?: number,
+    /** Optional delay (ms) between RPC sync batches (default: 1000). Lower it (e.g. 0–50)
+     *  for RPC-only chains to make a from-deployment sync feasible. */
+    rpcBatchDelayMs?: number,
     /** Optional index for key derivation (default: 0) */
     keyIndex?: number,
-    /** Optional POI toggle (default: true) */
+    /** Optional POI toggle (default: true). POI requires a subsquid endpoint and is
+     *  automatically skipped on chains that don't have one. */
     poi?: boolean,
     /** Optional bundler config */
     bundler?: BundlerConfig
@@ -129,15 +134,23 @@ export async function createRailgunPlugin(host: Host, config?: RailgunPluginConf
     const database = new DatabaseAdapter(chainId.toString(), host.storage);
 
     console.log("Building Railgun provider");
+    //? Chains without a subsquid endpoint (e.g. Arbitrum Sepolia) sync UTXOs over RPC only.
+    //? ChainedSyncer calls each syncer's latest_block() un-caught, so including a subsquid
+    //? syncer with an empty endpoint would break sync — only add it when one is configured.
+    const useSubsquid = !!chain.subsquidEndpoint;
+    const syncers: UtxoSyncer[] = [];
+    if (useSubsquid) {
+        syncers.push(UtxoSyncer.subsquid(chain));
+    }
+    const rpcBatchDelayMs = config?.rpcBatchDelayMs === undefined ? undefined : BigInt(config.rpcBatchDelayMs);
+    syncers.push(
+        UtxoSyncer.rpc(chain, eip1193Provider, BigInt(config?.rpcBatchSize ?? 10), rpcBatchDelayMs)
+    );
     let builder = new RailgunBuilder(chain, eip1193Provider)
         .withDatabase(database)
-        .withUtxoSyncer(
-            UtxoSyncer.chained([
-                UtxoSyncer.subsquid(chain),
-                UtxoSyncer.rpc(chain, eip1193Provider, BigInt(config?.rpcBatchSize ?? 10))
-            ])
-        );
-    if (config?.poi !== false) {
+        .withUtxoSyncer(UtxoSyncer.chained(syncers));
+    //? POI's TXID tree also syncs via subsquid, so POI requires a subsquid endpoint.
+    if (config?.poi !== false && useSubsquid) {
         console.log("Enabling POI");
         builder = builder.withPoi();
     }
@@ -286,6 +299,43 @@ export class RailgunPlugin implements RGInstance, RGBroadcaster {
         }
 
         return { __type: 'privateOperation', builder, nativeAmount, to };
+    }
+
+    /**
+     * Prepares a self-broadcastable Railgun RelayAdapt cross-contract unshield: unshields
+     * `unshield` (ERC20/WETH) into the RelayAdapt contract, runs `calls` atomically inside
+     * the RelayAdapt multicall, then re-shields the change back to this wallet's own 0zk.
+     *
+     * Returns `RelayAdapt.relay(...)` calldata as `TxData` to be sent by a funded EOA
+     * broadcaster (gas-only; the broadcaster never custodies the unshielded funds). Used by
+     * @kohaku-eth/train for the private source-chain deposit where no 4337 paymaster exists.
+     *
+     * `minGasLimit` is placed verbatim in `actionData.minGasLimit` (default 3_050_000, i.e.
+     * the railgun-community minimum 3_200_000 minus 150_000); the broadcast envelope gas
+     * limit must be at least the un-reduced minimum.
+     */
+    async prepareRelayAdaptUnshield(req: {
+        unshield: AssetAmount,
+        reshieldTo?: string,
+        calls: { to: `0x${string}`, value: bigint, data: `0x${string}` }[],
+        requireSuccess?: boolean,
+        minGasLimit?: bigint,
+    }): Promise<TxData> {
+        if (req.unshield.asset.__type !== 'erc20') {
+            throw new Error("RelayAdapt unshield currently supports ERC20 (e.g. WETH) only");
+        }
+        const asset = { type: "Erc20" as const, value: req.unshield.asset.contract };
+
+        const tx = await this.provider.prepareRelayAdaptUnshield(this.pool.primary, {
+            unshields: [{ asset, amount: req.unshield.amount }],
+            calls: req.calls.map((c) => ({ to: c.to, data: c.data, value: c.value })),
+            //? Re-shield the entire remaining balance (value 0) back to this wallet's 0zk.
+            reshields: [{ asset, amount: 0n }],
+            requireSuccess: req.requireSuccess ?? true,
+            minGasLimit: req.minGasLimit ?? 3_050_000n,
+        });
+
+        return { to: tx.to, data: tx.data, value: BigInt(tx.value) };
     }
 
     async prepareTransfer(token: AssetAmount, to: RailgunAddress): Promise<RGPrivateOperation> {

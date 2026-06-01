@@ -1,9 +1,9 @@
 use std::str::FromStr;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, Bytes, U256};
 use eip_1193_provider::tx_data::TxData;
 use railgun::{account::address::RailgunAddress, caip::AssetId, provider::RailgunProvider};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use userop_kit::railgun::TailCall;
 use userop_kit_ts::{bundler::JsBundler, signable_user_operation::JsSignableUserOperation};
@@ -24,6 +24,44 @@ pub struct JsRailgunProvider {
 #[tsify(into_wasm_abi)]
 #[serde(transparent)]
 pub struct Balances(Vec<(AssetId, u128)>);
+
+/// An asset + amount for a RelayAdapt unshield/re-shield (amount `0` re-shields the
+/// entire remaining balance of that asset).
+#[derive(Tsify, Deserialize)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct JsAssetAmount {
+    pub asset: AssetId,
+    #[tsify(type = "bigint")]
+    pub amount: u128,
+}
+
+/// A cross-contract call executed by the RelayAdapt multicall (msg.sender == RelayAdapt).
+#[derive(Tsify, Deserialize)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct JsRelayCall {
+    #[tsify(type = "`0x${string}`")]
+    pub to: Address,
+    #[tsify(type = "`0x${string}`")]
+    pub data: Bytes,
+    #[tsify(type = "bigint")]
+    pub value: u128,
+}
+
+/// Request for `prepareRelayAdaptUnshield`. `minGasLimit` is placed verbatim in
+/// `actionData.minGasLimit` (use the reduced value, e.g. 3_050_000).
+#[derive(Tsify, Deserialize)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayAdaptUnshieldRequest {
+    pub unshields: Vec<JsAssetAmount>,
+    pub calls: Vec<JsRelayCall>,
+    pub reshields: Vec<JsAssetAmount>,
+    pub require_success: bool,
+    #[tsify(type = "bigint")]
+    pub min_gas_limit: u128,
+}
 
 impl JsRailgunProvider {
     pub fn new(inner: RailgunProvider) -> Self {
@@ -121,5 +159,43 @@ impl JsRailgunProvider {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(JsSignableUserOperation::new(signable))
+    }
+
+    /// Prepares a self-broadcastable RelayAdapt cross-contract unshield: unshields to the
+    /// RelayAdapt contract, runs `calls`, then re-shields `reshields` back to `from`'s own
+    /// 0zk address. Returns `RelayAdapt.relay(...)` calldata as a `TxData` for a funded EOA
+    /// broadcaster (the broadcaster pays gas but never custodies the funds).
+    #[wasm_bindgen(js_name = "prepareRelayAdaptUnshield")]
+    pub async fn prepare_relay_adapt_unshield(
+        &mut self,
+        from: &JsRailgunSigner,
+        req: RelayAdaptUnshieldRequest,
+    ) -> Result<TxData, JsError> {
+        let reshield_recipient = from.address();
+        let unshields = req.unshields.into_iter().map(|a| (a.asset, a.amount)).collect();
+        let user_calls = req
+            .calls
+            .into_iter()
+            .map(|c| (c.to, c.data, U256::from(c.value)))
+            .collect();
+        let reshields = req
+            .reshields
+            .into_iter()
+            .map(|a| (reshield_recipient.clone(), a.asset, a.amount))
+            .collect();
+        let mut rng = rand::rng();
+
+        self.inner
+            .prepare_relay_adapt_unshield(
+                from.inner(),
+                unshields,
+                user_calls,
+                reshields,
+                req.require_success,
+                req.min_gas_limit,
+                &mut rng,
+            )
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 }

@@ -19,7 +19,7 @@ use std::{
     sync::Arc,
 };
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, FixedBytes, U256};
 use rand::Rng;
 use thiserror::Error;
 use tracing::info;
@@ -155,6 +155,39 @@ impl TransactionBuilder {
         Ok(self)
     }
 
+    /// Builds (groups intents + selects notes + verifies) the UNPROVED operations.
+    ///
+    /// Split out so callers (e.g. the RelayAdapt cross-contract path) can inspect the
+    /// operations' nullifiers before proving, since `adaptParams` must be computed
+    /// from the nullifiers and bound into each operation's proof.
+    pub(crate) fn build_operations<R: Rng>(
+        &self,
+        in_notes: &[UtxoNote],
+        rng: &mut R,
+    ) -> Result<Vec<Operation>, TransactionBuilderError> {
+        let groups = self.group_intents();
+        let operations = build_groups(in_notes, groups, rng)?;
+
+        for op in &operations {
+            op.verify()?;
+        }
+
+        Ok(operations)
+    }
+
+    /// Proves a set of operations, optionally binding a RelayAdapt
+    /// `(adapt_contract, adapt_params)` into each operation's `BoundParams`.
+    pub(crate) async fn prove<R: Rng>(
+        prover: &Groth16Prover,
+        utxo_trees: &BTreeMap<u32, UtxoMerkleTree>,
+        chain_id: u64,
+        operations: &[Operation],
+        adapt: Option<(Address, FixedBytes<32>)>,
+        rng: &mut R,
+    ) -> Result<Vec<ProvedOperation>, TransactionBuilderError> {
+        prove_operations(prover, utxo_trees, chain_id, operations, adapt, rng).await
+    }
+
     /// Builds and proves a set of operations for railgun, without packaging into a transaction.
     pub(crate) async fn build<R: Rng>(
         &self,
@@ -164,15 +197,8 @@ impl TransactionBuilder {
         utxo_trees: &BTreeMap<u32, UtxoMerkleTree>,
         rng: &mut R,
     ) -> Result<Vec<ProvedOperation>, TransactionBuilderError> {
-        let groups = self.group_intents();
-        let operations = build_groups(in_notes, groups, rng)?;
-
-        for op in &operations {
-            op.verify()?;
-        }
-
-        let proved = prove_operations(prover, utxo_trees, chain_id, &operations, rng).await?;
-        Ok(proved)
+        let operations = self.build_operations(in_notes, rng)?;
+        prove_operations(prover, utxo_trees, chain_id, &operations, None, rng).await
     }
 
     /// Group intents with the following rules:
@@ -382,6 +408,7 @@ async fn prove_operations(
     utxo_trees: &BTreeMap<u32, UtxoMerkleTree>,
     chain_id: u64,
     operations: &[Operation],
+    adapt: Option<(Address, FixedBytes<32>)>,
     rng: &mut impl Rng,
 ) -> Result<Vec<ProvedOperation>, TransactionBuilderError> {
     let mut proved = Vec::new();
@@ -390,7 +417,7 @@ async fn prove_operations(
         let Some(utxo_tree) = utxo_trees.get(&tree) else {
             return Err(TransactionBuilderError::MissingTree(tree));
         };
-        let proved_op = prove_operation(prover, utxo_tree, chain_id, op, rng).await?;
+        let proved_op = prove_operation(prover, utxo_tree, chain_id, op, adapt, rng).await?;
         proved.push(proved_op);
     }
     Ok(proved)
@@ -401,6 +428,7 @@ async fn prove_operation(
     utxo_tree: &UtxoMerkleTree,
     chain_id: u64,
     operation: &Operation,
+    adapt: Option<(Address, FixedBytes<32>)>,
     rng: &mut impl Rng,
 ) -> Result<ProvedOperation, TransactionBuilderError> {
     info!("Constructing circuit inputs");
@@ -414,15 +442,18 @@ async fn prove_operation(
         .map(|n| n.encrypt(rng))
         .collect::<Result<_, _>>()?;
 
-    //? min_gas_price, adapt_contract, and adapt_input are all vestigial fields for
-    //? railgun relayers.
+    //? min_gas_price is vestigial for railgun relayers. adapt_contract/adapt_params are
+    //? zero for plain transact/unshield, and set to the RelayAdapt address + the
+    //? `getRelayAdaptParams` hash for RelayAdapt cross-contract calls (binds the proof to
+    //? exactly those calls, the on-chain MITM protection).
+    let (adapt_contract, adapt_params) = adapt.unwrap_or((Address::ZERO, FixedBytes::<32>::ZERO));
     let bound_params = abis::railgun::BoundParams::new(
         utxo_tree.number() as u16,
         0,
         unshield_type,
         chain_id,
-        Address::ZERO,
-        &[0u8; 32],
+        adapt_contract,
+        &adapt_params.0,
         commitment_ciphertexts,
     );
 
