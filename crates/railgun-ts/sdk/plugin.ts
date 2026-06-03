@@ -98,6 +98,12 @@ export type RailgunPluginConfig = {
     /** Optional POI toggle (default: true). POI requires a subsquid endpoint and is
      *  automatically skipped on chains that don't have one. */
     poi?: boolean,
+    /** Optional override for the UTXO scan start block. Defaults to the chain's contract
+     *  deploymentBlock. On RPC-only chains (no subsquid) a from-deployment scan over a public
+     *  RPC is infeasibly slow; set this to a recent block to scan only the relevant range.
+     *  NOTE: notes shielded before this block will not be discovered — only use when the
+     *  account has no earlier shielded history on this chain. */
+    syncFromBlock?: number,
     /** Optional bundler config */
     bundler?: BundlerConfig
 };
@@ -128,6 +134,13 @@ export async function createRailgunPlugin(host: Host, config?: RailgunPluginConf
     const chain = chainConfig(chainId);
     if (!chain) {
         throw new Error(`Unsupported chain ID: ${chainId}`);
+    }
+    // POC: allow callers to skip scanning ancient (empty) history on RPC-only chains by raising
+    // the scan start. chainConfig() returns a plain JS object, so mutating it here is reflected
+    // in the ChainConfig handed to UtxoSyncer.rpc below.
+    if (config?.syncFromBlock !== undefined) {
+        console.log(`Overriding scan start block: ${chain.deploymentBlock} -> ${config.syncFromBlock}`);
+        chain.deploymentBlock = config.syncFromBlock;
     }
 
     const eip1193Provider = new EthereumProviderAdapter(host.provider);
@@ -299,6 +312,25 @@ export class RailgunPlugin implements RGInstance, RGBroadcaster {
         }
 
         return { __type: 'privateOperation', builder, nativeAmount, to };
+    }
+
+    /**
+     * Proves a prepared private operation (unshield/transfer) and returns the raw Railgun
+     * `transact()` calldata as `TxData`, so it can be SELF-BROADCAST by a funded EOA / the user's
+     * own account — instead of relayed through a Waku broadcaster via {@link broadcast}.
+     *
+     * Use this on chains where no Waku broadcaster exists (e.g. testnets): the proof is verified
+     * on-chain in `transact()`, so any sender can include it (they pay gas and, unlike the Waku
+     * path, are publicly linked to the tx — there is no broadcaster unlinkability).
+     *
+     * NOTE: for a native unshield the recipient receives the wrapped base token (WETH); the
+     * WETH.withdraw() unwrap tail that {@link broadcast} appends is not added here.
+     */
+    async buildPrivateOp(op: RGPrivateOperation): Promise<TxData> {
+        const tx = await this.provider.build(op.builder);
+        // pkg TxData has `value` as a 0x-hex string; the @kohaku-eth/provider TxData wants bigint
+        // (same conversion prepareRelayAdaptUnshield does).
+        return { to: tx.to, data: tx.data, value: BigInt(tx.value) };
     }
 
     /**

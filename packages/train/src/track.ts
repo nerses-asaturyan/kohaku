@@ -48,7 +48,6 @@ export async function trackFill(args: TrackFillArgs): Promise<BridgeHandle> {
   const { intent } = handle;
   const train = trainChain(intent.dstChainId).trainContract;
   const receiver = getAddress(intent.shieldedReceiverAddress);
-  const wantToken = getAddress(intent.dstTrainToken);
   const { hashlock } = intent;
 
   const timeoutMs = args.timeoutMs ?? DEFAULT_DISCOVER_TIMEOUT_MS;
@@ -89,9 +88,13 @@ export async function trackFill(args: TrackFillArgs): Promise<BridgeHandle> {
 
       if (!lock) continue;
 
+      // Match by recipient (our ShieldedReceiver) + Pending status. The lock is already scoped to
+      // our hashlock by getSolverLock(hashlock, i), so that uniquely identifies our fill.
+      // We deliberately do NOT require lock.token === dstTrainToken: the solver locks the ROUTE's
+      // destination token (native ETH on this route), whereas dstTrainToken is the HTLC binding /
+      // re-shielded asset (WETH). Comparing them caused a real fill to never be detected.
       if (
         getAddress(lock.recipient) === receiver &&
-        getAddress(lock.token) === wantToken &&
         Number(lock.status) === LOCK_STATUS.Pending
       ) {
         handle = transition(handle, BridgeState.Filled, { solverIndex: i.toString() });

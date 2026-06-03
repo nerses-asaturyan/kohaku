@@ -2,7 +2,7 @@ import type { Host, Storage } from '@kohaku-eth/plugins';
 import type { TxData, TxSigner } from '@kohaku-eth/provider';
 import { type Hex, encodeFunctionData, getAddress } from 'viem';
 
-import { ERC20_ABI } from './abis';
+import { ERC20_ABI, WETH_ABI } from './abis';
 import type { RelayAdaptUnshieldFn } from './railgun';
 import { commit, newHandle, transition } from './state';
 import { type BridgeCallbacks, type BridgeHandle, type BridgeIntent, BridgeState } from './types';
@@ -36,15 +36,30 @@ export async function submitIntent(args: SubmitIntentArgs): Promise<BridgeHandle
   args.callbacks?.onProgress?.({ step: BridgeState.SourceLocked, current: 0, total: 1, note: 'building source spend' });
 
   const lockAmount = BigInt(intent.lockAmount);
-  const approveData = encodeFunctionData({
-    abi: ERC20_ABI,
-    functionName: 'approve',
-    args: [getAddress(intent.srcTrainAddress), lockAmount],
-  });
+  const userLockValue = BigInt(intent.userLockValueWei);
+  // Native route (value-bearing userLock): unwrap the unshielded WETH -> native ETH inside the
+  // RelayAdapt multicall, then pay userLock with ETH value (no approve). ERC20 route: approve + pull.
+  const isNative = userLockValue > 0n;
+
+  const prelude = isNative
+    ? {
+        to: getAddress(intent.unshieldToken),
+        value: 0n,
+        data: encodeFunctionData({ abi: WETH_ABI, functionName: 'withdraw', args: [lockAmount] }),
+      }
+    : {
+        to: getAddress(intent.unshieldToken),
+        value: 0n,
+        data: encodeFunctionData({
+          abi: ERC20_ABI,
+          functionName: 'approve',
+          args: [getAddress(intent.srcTrainAddress), lockAmount],
+        }),
+      };
 
   const calls = [
-    { to: getAddress(intent.unshieldToken), value: 0n, data: approveData },
-    { to: getAddress(intent.srcTrainAddress), value: BigInt(intent.userLockValueWei), data: intent.userLockCalldata },
+    prelude,
+    { to: getAddress(intent.srcTrainAddress), value: userLockValue, data: intent.userLockCalldata },
   ];
 
   const txData: TxData = await args.relayAdaptUnshield({

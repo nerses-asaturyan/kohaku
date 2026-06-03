@@ -46,6 +46,8 @@ export type UserLockMappingArgs = {
   sourceToken: Address;
   /** Address that receives a refund after the timelock (the user's public/refund address). */
   refundTo: Address;
+  /** True when the TRAIN route token is native ETH → userLock is value-bearing (no approve). */
+  isNativeSource?: boolean;
 };
 
 export type BuiltUserLock = {
@@ -103,7 +105,9 @@ export function mapQuoteToUserLock(args: UserLockMappingArgs): BuiltUserLock {
 
   return {
     calldata,
-    valueWei: 0n, // WETH/ERC20 path
+    // Native route: TRAIN.userLock is value-bearing (paid in native ETH, no approve/transferFrom).
+    // ERC20 route: value 0 (TRAIN pulls via transferFrom after approve).
+    valueWei: args.isNativeSource ? lockAmount : 0n,
     lockAmount,
     quoteExpiry: BigInt(params.quoteExpiry),
     timelockDelta: BigInt(params.timelockDelta),
@@ -162,6 +166,7 @@ export async function buildUserLock(
     lockAmount: args.amount,
     sourceToken: getAddress(sourceTokenContract),
     refundTo: args.refundTo,
+    isNativeSource: getAddress(sourceTokenContract) === getAddress(src.nativeTokenAddress),
   });
 
   return {

@@ -3,7 +3,13 @@ import { type Address, type Hex, bytesToBigInt, decodeFunctionData, getAddress }
 
 import { TRAIN_ABI } from './abis';
 import { computeBinding } from './binding';
-import { DEFAULT_DEST_CHAIN_ID, DEFAULT_SOURCE_CHAIN_ID, UINT120_MAX, trainChain } from './config';
+import {
+  DEFAULT_DEST_CHAIN_ID,
+  DEFAULT_SOURCE_CHAIN_ID,
+  UINT120_MAX,
+  ZERO_ADDRESS,
+  trainChain
+} from './config';
 import { inverseUnshieldGross } from './fees';
 import { buildShieldTemplate } from './railgun';
 import { type TrainApi, buildUserLock, loadTrainApi, substituteHashlock } from './quote';
@@ -70,15 +76,23 @@ export async function createBridgeIntent(args: CreateBridgeIntentArgs): Promise<
   if (!shieldedReceiver) throw new Error(`no ShieldedReceiver configured for dst chain ${dstChainId}`);
 
   // 1. Destination shield template (+ the dst 0zk recipient) and the HTLC binding.
-  const dstWeth = args.destinationTokenContract ?? dstChain.weth;
-  const { template, railgunAddress } = await buildShieldTemplate(args.dstRailgun, dstWeth);
+  // The Railgun-shielded asset (the shield template / re-shielded asset) is WETH on both chains.
+  const shieldToken = dstChain.weth;
+  const { template, railgunAddress } = await buildShieldTemplate(args.dstRailgun, shieldToken);
 
   const r = randomUint256();
-  const dstTrainToken = getAddress(dstWeth); // WETH-as-ERC20: dst Train lock token == shield token
+  // Binding / lock token == the TRAIN route's DESTINATION token, which is what the SOLVER actually
+  // locks and what ShieldedReceiver.redeemAndShield validates the lock against. The route defaults
+  // to NATIVE ETH (ZERO_ADDRESS) — matching quote.ts's destinationTokenContract default. Using WETH
+  // here (the re-shielded asset) made redeemAndShield revert with InvalidLock() because the solver's
+  // on-chain lock token is native (0x0), not WETH. The re-shielded asset stays WETH via `template`.
+  const dstTrainToken = getAddress(args.destinationTokenContract ?? ZERO_ADDRESS);
   const { secret, hashlock } = computeBinding(r, dstTrainToken, template);
 
   // 2. Source userLock — fetch a fresh quote, or re-bind a supplied calldata.
-  const srcWeth = args.sourceTokenContract ?? srcChain.weth;
+  // Railgun unshields WETH; the TRAIN route token defaults to native ETH (the live Station route),
+  // and the WETH is unwrapped to ETH inside the RelayAdapt multicall at submit time.
+  const srcWeth = srcChain.weth;
   let userLockCalldata: Hex;
   let userLockValueWei = 0n;
   let lockAmount: bigint;
@@ -105,8 +119,9 @@ export async function createBridgeIntent(args: CreateBridgeIntentArgs): Promise<
       hashlock,
       shieldedReceiver,
       refundTo: getAddress(args.refundTo),
-      sourceTokenContract: getAddress(srcWeth),
-      destinationTokenContract: dstTrainToken,
+      // TRAIN route token = native ETH (Station /networks default) unless explicitly overridden.
+      sourceTokenContract: args.sourceTokenContract,
+      destinationTokenContract: args.destinationTokenContract,
     });
 
     userLockCalldata = built.calldata;
@@ -135,7 +150,7 @@ export async function createBridgeIntent(args: CreateBridgeIntentArgs): Promise<
     dstChainId,
     srcTrainAddress,
     dstTrainToken,
-    shieldToken: dstTrainToken,
+    shieldToken: getAddress(shieldToken),
     shieldedReceiverAddress: shieldedReceiver,
     railgunAddress,
     unshieldToken: getAddress(srcWeth),

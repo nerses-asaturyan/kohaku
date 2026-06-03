@@ -27,6 +27,16 @@ export const ERC20_ABI = parseAbi([
   'function balanceOf(address owner) view returns (uint256)',
 ]);
 
+/**
+ * Canonical WETH9. `withdraw` unwraps WETH→native ETH inside the RelayAdapt multicall so the
+ * native-ETH TRAIN route can be funded from a Railgun-shielded WETH balance (the live Station
+ * only quotes the native 0x0 route; the user's shielded asset is WETH).
+ */
+export const WETH_ABI = parseAbi([
+  'function withdraw(uint256 amount)',
+  'function deposit() payable',
+]);
+
 /** RailgunSmartWallet.shield(ShieldRequest[]) — used to DECODE `prepareShield` calldata for the template. */
 export const RAILGUN_SHIELD_ABI = parseAbi([
   'function shield(((bytes32 npk,(uint8 tokenType,address tokenAddress,uint256 tokenSubID) token,uint120 value) preimage,(bytes32[3] encryptedBundle,bytes32 shieldKey) ciphertext)[] requests)',

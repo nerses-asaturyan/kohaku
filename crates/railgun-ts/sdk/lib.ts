@@ -4,11 +4,17 @@ export type { RailgunPlugin, RailgunPluginConfig, BundlerConfig } from "./plugin
 export { createRailgunPlugin } from "./plugin.js";
 
 let initPromise: Promise<void> | null = null;
+let loggingInitialized = false;
 
 export async function ensureInitialized(wasmInput?: BufferSource | Response, logLevel?: LogLevel): Promise<void> {
     if (!initPromise) initPromise = _init(wasmInput);
     await initPromise;
-    initLogging(logLevel ?? "Info");
+    // initLogging() calls tracing's set_global_default, which panics if run twice. Gate it so
+    // repeated ensureInitialized() calls (e.g. boot + createRailgunPlugin) don't re-init logging.
+    if (!loggingInitialized) {
+        loggingInitialized = true;
+        initLogging(logLevel ?? "Info");
+    }
 }
 
 async function _init(wasmInput?: BufferSource | Response): Promise<void> {
