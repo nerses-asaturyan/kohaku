@@ -11,16 +11,55 @@ export type VerifyArgs = {
   txHash: Hex;
 };
 
-export type VerifyResult = { ok: boolean; reasons: string[] };
+export type VerifyResult = {
+  ok: boolean;
+  reasons: string[];
+  /** True when the failure is a CONTRADICTION (e.g. reverted receipt) rather than possibly-stale
+   *  reads — definitive failures stop the retry loop early. */
+  definitive?: boolean;
+};
+
+export type VerifyOpts = { timeoutMs?: number; intervalMs?: number };
 
 /**
- * Trustlessly verify the destination redeem+shield happened, against a
- * Helios-verified view of Ethereum Sepolia:
+ * Trustlessly verify the destination redeem+shield happened:
  *   1. the redeemAndShield receipt succeeded,
  *   2. a `ShieldedRedeemed` event for (hashlock, index) was emitted by the receiver,
  *   3. the solver lock is now `Redeemed`.
+ *
+ * PATIENT by design: right after the redeem mines, a load-balanced RPC node can briefly return no
+ * receipt or a stale solver-lock state. Those are INCONCLUSIVE, not failures — this retries until
+ * the window closes, and only a contradiction (reverted receipt) fails fast. A thrown provider
+ * error during an attempt is also treated as inconclusive (never escalate a transient read error
+ * into a FAILED bridge — the redeem may have succeeded).
  */
-export async function verifyShieldedRedeem(provider: EthereumProvider, args: VerifyArgs): Promise<VerifyResult> {
+export async function verifyShieldedRedeem(
+  provider: EthereumProvider,
+  args: VerifyArgs,
+  opts: VerifyOpts = {},
+): Promise<VerifyResult> {
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const intervalMs = opts.intervalMs ?? 3_000;
+  const deadline = Date.now() + timeoutMs;
+
+  let last: VerifyResult = { ok: false, reasons: ['verification did not run'] };
+
+  for (;;) {
+    try {
+      last = await verifyShieldedRedeemOnce(provider, args);
+    } catch (e) {
+      last = { ok: false, reasons: [`verification read error: ${(e as Error)?.message ?? e}`] };
+    }
+
+    if (last.ok || last.definitive || Date.now() >= deadline) return last;
+
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+/** One verification pass against the current provider view (no retries). */
+export async function verifyShieldedRedeemOnce(provider: EthereumProvider, args: VerifyArgs): Promise<VerifyResult> {
   const reasons: string[] = [];
   let ok = true;
 
@@ -29,8 +68,8 @@ export async function verifyShieldedRedeem(provider: EthereumProvider, args: Ver
   if (!receipt) return { ok: false, reasons: ['no receipt for redeemAndShield tx'] };
 
   if (receipt.status !== 1n) {
-    ok = false;
-    reasons.push(`redeemAndShield reverted (status ${receipt.status})`);
+    // A mined-and-reverted redeem is a real contradiction — no amount of waiting changes it.
+    return { ok: false, reasons: [`redeemAndShield reverted (status ${receipt.status})`], definitive: true };
   }
 
   let sawEvent = false;

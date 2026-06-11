@@ -105,7 +105,14 @@ export type RailgunPluginConfig = {
      *  account has no earlier shielded history on this chain. */
     syncFromBlock?: number,
     /** Optional bundler config */
-    bundler?: BundlerConfig
+    bundler?: BundlerConfig,
+    /** Optional ChainConfig for chains NOT baked into the WASM `chainConfig()` (e.g. self-hosted
+     *  testnet deployments like Linea Sepolia). When the WASM has no entry for the connected chain,
+     *  this is used instead. `chainConfig()` returns a plain JS object, so a JS-constructed config of
+     *  the same shape ({ id, railgunSmartWallet, unshieldFeeBps, relayAdaptContract, wrappedBaseToken,
+     *  deploymentBlock, poiStartBlock, subsquidEndpoint, poiEndpoint, listKeys }) is accepted by the
+     *  downstream WASM builders. Avoids a WASM rebuild to add a chain. */
+    chainConfigOverride?: ChainConfig
 };
 
 export type BundlerConfig = {
@@ -131,9 +138,14 @@ export async function createRailgunPlugin(host: Host, config?: RailgunPluginConf
 
     console.log("Fetching chain config");
     const chainId = await host.provider.getChainId();
-    const chain = chainConfig(chainId);
+    // Prefer the WASM-baked chainConfig; fall back to a caller-supplied override for chains the
+    // WASM doesn't know (e.g. self-hosted Linea Sepolia). Both are plain JS objects.
+    const chain = chainConfig(chainId) ?? config?.chainConfigOverride;
     if (!chain) {
-        throw new Error(`Unsupported chain ID: ${chainId}`);
+        throw new Error(`Unsupported chain ID: ${chainId} (no WASM chainConfig and no chainConfigOverride)`);
+    }
+    if (!chainConfig(chainId) && config?.chainConfigOverride) {
+        console.log(`Using chainConfigOverride for chain ${chainId}`);
     }
     // POC: allow callers to skip scanning ancient (empty) history on RPC-only chains by raising
     // the scan start. chainConfig() returns a plain JS object, so mutating it here is reflected

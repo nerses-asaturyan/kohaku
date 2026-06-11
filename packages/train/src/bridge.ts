@@ -7,6 +7,7 @@ import { completeShield } from './complete';
 import { type CreateBridgeIntentArgs, createBridgeIntent } from './intent';
 import { type RelayAdaptUnshieldFn, relayAdaptUnshieldViaPlugin } from './railgun';
 import { refundBridge } from './refund';
+import { reverifyShieldedRedeem } from './reverify';
 import { listHandles, loadHandle } from './state';
 import { submitIntent } from './submit';
 import { trackFill } from './track';
@@ -42,6 +43,9 @@ export type TrainBridge = {
   start(args: StartBridgeArgs): Promise<BridgeHandle>;
   track(handle: BridgeHandle, opts?: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal }): Promise<BridgeHandle>;
   complete(handle: BridgeHandle, opts?: { verify?: boolean }): Promise<BridgeHandle>;
+  /** Recovery: re-run destination verification on a FAILED handle whose redeem WAS broadcast
+   *  (dstTxHash present); promotes FAILED → COMPLETED when the redeem checks out on-chain. */
+  reverify(handle: BridgeHandle): Promise<BridgeHandle>;
   refund(handle: BridgeHandle): Promise<BridgeHandle>;
   loadBridge(hashlock: Hex): BridgeHandle | null;
   listBridges(): BridgeHandle[];
@@ -89,6 +93,7 @@ export function createTrainBridge(opts: TrainBridgeOpts): TrainBridge {
       trackFill({ dstHost: opts.dst.host, handle, storage, callbacks, timeoutMs: o?.timeoutMs, intervalMs: o?.intervalMs, signal: o?.signal }),
     complete: (handle, o) =>
       completeShield({ dstHost: opts.dst.host, handle, relayer: opts.dst.relayer, storage, callbacks, verify: o?.verify }),
+    reverify: (handle) => reverifyShieldedRedeem({ dstHost: opts.dst.host, handle, storage, callbacks }),
     refund: (handle) =>
       refundBridge({ srcHost: opts.src.host, handle, relayer: opts.src.broadcaster, storage, callbacks }),
     loadBridge: (hashlock) => loadHandle(storage, hashlock),

@@ -23,8 +23,8 @@ export type CreateBridgeIntentArgs = {
   /** Refund recipient on the source after the timelock (the user's public address). */
   refundTo: Address;
 
-  srcChainId?: number; // default Arbitrum Sepolia
-  dstChainId?: number; // default Ethereum Sepolia
+  srcChainId?: number; // default DEFAULT_SOURCE_CHAIN_ID (Ethereum Sepolia)
+  dstChainId?: number; // default DEFAULT_DEST_CHAIN_ID (Linea Sepolia)
 
   /** Pre-constructed Station client; else one is loaded from `trainStationUrl`. */
   trainApi?: TrainApi;

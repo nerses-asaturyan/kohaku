@@ -16,32 +16,47 @@ export type TrainChainConfig = {
   shieldedReceiver?: Address;
 };
 
-/** SOURCE chain. Paymaster/7702-IMPL are NOT deployed here → source uses RelayAdapt + a funded EOA broadcaster. */
-export const ARBITRUM_SEPOLIA: TrainChainConfig = {
-  chainId: 421614,
-  caip2: 'eip155:421614',
-  railgunProxy: getAddress('0x9Bfa29dC6cA794b8A49bC928EB4F5bBD80CD5Ab9'),
-  relayAdapt: getAddress('0x4B24c032569A45266F057EcE1Fd189a619D58ce6'),
-  weth: getAddress('0x980B62Da83eFf3D4576C647993b0c1D7faf17c73'),
-  // Source Train (POC DST_TRAIN_ADDRESS). The Station /networks trainContract overrides this at quote time.
-  trainContract: getAddress('0x39c58617d355d8b432a3675714b93ec840872236'),
-};
-
-/** DESTINATION chain. Helios-verifiable; ShieldedReceiver deployed here. */
+/** Helios-verifiable (ethereum kind). Has both a Train contract and a ShieldedReceiver → can be source OR destination. */
 export const ETHEREUM_SEPOLIA: TrainChainConfig = {
   chainId: 11155111,
   caip2: 'eip155:11155111',
   railgunProxy: getAddress('0xeCFCf3b4eC647c4Ca6D49108b311b7a7C9543fea'),
   relayAdapt: getAddress('0x7e3d929EbD5bDC84d02Bd3205c777578f33A214D'),
   weth: getAddress('0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14'),
-  // Destination Train that the ShieldedReceiver below was deployed against (POC TRAIN_ADDRESS).
+  // Train this chain's ShieldedReceiver was deployed against. As SOURCE, the Station /networks
+  // trainContract overrides this at quote time; this is the fallback.
   trainContract: getAddress('0x8cEa9E4Bee95c6029A41750F66f13Cf50c918Ce6'),
   shieldedReceiver: getAddress('0x4DB9263e0f9536777cAb3ea31D61C10D56bD604C'),
 };
 
+/** Linea Sepolia. Full Railgun + Train + ShieldedReceiver stack deployed → can be source OR destination. */
+export const LINEA_SEPOLIA: TrainChainConfig = {
+  chainId: 59141,
+  caip2: 'eip155:59141',
+  railgunProxy: getAddress('0xD6C73faEB021253007C833d742F34A2C5Fe2bA55'),
+  relayAdapt: getAddress('0x05dba0BcBF7a3c7f13173c607ED4624F7CB13C53'),
+  weth: getAddress('0x06565ed324Ee9fb4DB0FF80B7eDbE4Cb007555a3'),
+  trainContract: getAddress('0x473d2032f0389075c5067D972b250Fe8437588B3'),
+  shieldedReceiver: getAddress('0x550651a0Eb9ABe14774E6fa90D63a7D9b605111c'),
+};
+
+/** Base Sepolia (opstack — Helios-verifiable via the default consensus endpoint). Full Railgun +
+ *  Train + ShieldedReceiver stack deployed → can be source OR destination. */
+export const BASE_SEPOLIA: TrainChainConfig = {
+  chainId: 84532,
+  caip2: 'eip155:84532',
+  railgunProxy: getAddress('0x31b1bAf7171F196F0798062dA8f8078D521B1f8b'),
+  relayAdapt: getAddress('0x1691fe4E90A723ed077F2010F3931609D92aE6aB'),
+  weth: getAddress('0x4200000000000000000000000000000000000006'),
+  // Matches the Station /networks trainContract for eip155:84532 (overridden at quote time anyway).
+  trainContract: getAddress('0x1573acd71a67440ba25f9fae9388b5b94e1ab881'),
+  shieldedReceiver: getAddress('0xbbaefcb0ee512358b6c82f2eb4e1847cc10a310f'),
+};
+
 export const TRAIN_CHAINS: Record<number, TrainChainConfig> = {
-  [ARBITRUM_SEPOLIA.chainId]: ARBITRUM_SEPOLIA,
   [ETHEREUM_SEPOLIA.chainId]: ETHEREUM_SEPOLIA,
+  [LINEA_SEPOLIA.chainId]: LINEA_SEPOLIA,
+  [BASE_SEPOLIA.chainId]: BASE_SEPOLIA,
 };
 
 export function trainChain(chainId: number): TrainChainConfig {
@@ -52,9 +67,9 @@ export function trainChain(chainId: number): TrainChainConfig {
   return config;
 }
 
-/** Default direction: Arbitrum Sepolia (source) → Ethereum Sepolia (destination). */
-export const DEFAULT_SOURCE_CHAIN_ID = ARBITRUM_SEPOLIA.chainId;
-export const DEFAULT_DEST_CHAIN_ID = ETHEREUM_SEPOLIA.chainId;
+/** Default direction: Ethereum Sepolia (source) → Linea Sepolia (destination). */
+export const DEFAULT_SOURCE_CHAIN_ID = ETHEREUM_SEPOLIA.chainId;
+export const DEFAULT_DEST_CHAIN_ID = LINEA_SEPOLIA.chainId;
 
 /** Public Train testnet Station. Override with the `trainStationUrl` option. */
 export const DEFAULT_TRAIN_STATION_URL = 'https://train-solver-station.dev.lb.layerswap.cloud';

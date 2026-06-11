@@ -17,8 +17,15 @@ export { createBridgeIntent, type CreateBridgeIntentArgs } from './intent';
 export { submitIntent, type SubmitIntentArgs } from './submit';
 export { trackFill, type TrackFillArgs } from './track';
 export { completeShield, type CompleteShieldArgs } from './complete';
+export { reverifyShieldedRedeem, type ReverifyArgs } from './reverify';
 export { refundBridge, type RefundBridgeArgs } from './refund';
-export { verifyShieldedRedeem, type VerifyArgs, type VerifyResult } from './verify';
+export {
+  verifyShieldedRedeem,
+  verifyShieldedRedeemOnce,
+  type VerifyArgs,
+  type VerifyResult,
+  type VerifyOpts
+} from './verify';
 
 export {
   createTrainBridge,

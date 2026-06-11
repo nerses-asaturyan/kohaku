@@ -15,7 +15,9 @@ const ALLOWED: Record<BridgeState, BridgeState[]> = {
   [BridgeState.TimedOut]: [BridgeState.Refunded, BridgeState.Failed],
   [BridgeState.Completed]: [],
   [BridgeState.Refunded]: [],
-  [BridgeState.Failed]: [],
+  // FAILED can be promoted to COMPLETED by reverify(): a verification false-fail (RPC lag right
+  // after the redeem mined) marks a handle FAILED even though the redeem succeeded on-chain.
+  [BridgeState.Failed]: [BridgeState.Completed],
 };
 
 export function canTransition(from: BridgeState, to: BridgeState): boolean {
