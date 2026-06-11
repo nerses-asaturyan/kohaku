@@ -33,6 +33,14 @@ export async function submitIntent(args: SubmitIntentArgs): Promise<BridgeHandle
   let handle = args.handle ?? newHandle(intent);
   const ctx = { storage: args.storage ?? args.srcHost.storage, callbacks: args.callbacks };
 
+  // Persist the handle in CREATED state BEFORE building/broadcasting the lock. The intent holds the
+  // only copy of the HTLC secret/r; if anything throws between sendTransaction and the final commit
+  // (RPC waitForTransaction failure, a caller-side timeout, an extension reload) the WETH is locked
+  // on-chain but the secret would otherwise live only in volatile UI state and be lost — stranding
+  // the funds (no handle to resume/refund). Persisting first makes the lock recoverable via
+  // listBridges()/resume() no matter what fails next.
+  handle = commit(handle, ctx);
+
   args.callbacks?.onProgress?.({ step: BridgeState.SourceLocked, current: 0, total: 1, note: 'building source spend' });
 
   const lockAmount = BigInt(intent.lockAmount);
